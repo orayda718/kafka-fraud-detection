@@ -1,0 +1,16 @@
+# Java / Maven
+detector/target/
+*.class
+# Python
+.venv/
+__pycache__/
+*.pyc
+# Kafka Streams local state
+/tmp/kafka-streams/
+# Editors / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+# Large raw experiment output (commit summaries and plots, not huge logs)
+experiments/results/*.log
