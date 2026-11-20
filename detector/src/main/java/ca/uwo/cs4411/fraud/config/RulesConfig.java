@@ -54,7 +54,7 @@ public record RulesConfig(
         return fromProperties(props);
     }
 
-    static Properties loadDefaults() {
+    public static Properties loadDefaults() {
         Properties props = new Properties();
         try (InputStream in = RulesConfig.class.getResourceAsStream(RESOURCE)) {
             if (in == null) {
