@@ -109,15 +109,17 @@ It stops everything it started and restarts the killed broker when it exits. Log
 python experiments/recovery/measure_recovery.py                 # 3 runs, crash broker 2 (docker kill)
 python experiments/recovery/measure_recovery.py --mode stop     # graceful shutdown (docker stop)
 python experiments/recovery/measure_recovery.py --acks 1        # compare acknowledgement settings
+python experiments/recovery/measure_recovery.py --broker controller   # fail the active KRaft controller
 python experiments/recovery/plot_recovery.py                    # plot the latest run
 ```
 
-Each run sends numbered messages to a separate `recovery-test` topic at 500 msg/s, fails a broker after 10 s, restarts it 30 s later and records:
+Each run first moves partition leadership back to the preferred replicas (a restarted broker rejoins as a follower, so otherwise later runs would fail a broker that leads nothing). It then sends numbered messages to a separate `recovery-test` topic at 500 msg/s, fails a broker after 10 s, restarts it 30 s later and records:
 
 | Metric | Meaning |
 |---|---|
 | `leader_failover_s` | failure → every partition has a leader on a live broker |
-| `producer_stall_s` / `consumer_stall_s` | longest gap in acks / received messages after the failure |
+| `producer_stall_s` / `consumer_stall_s` | longest gap with no acks / no received messages at all after the failure |
+| `partitions_stalled` / `worst_partition_stall_s` | partitions whose acks paused for more than 1 s, and the longest pause on any one partition |
 | `p99_ack_ms_before` / `p99_ack_ms_after` | producer acknowledgement latency before and after the failure |
 | `lost_acked` | messages Kafka acknowledged but the consumer never received (expect 0 with `acks=all`) |
 | `duplicates` | messages received more than once |
