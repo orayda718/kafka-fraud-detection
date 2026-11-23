@@ -14,3 +14,5 @@ __pycache__/
 .DS_Store
 # Large raw experiment output (commit summaries and plots, not huge logs)
 experiments/results/*.log
+# Demo script logs
+demo-logs/
