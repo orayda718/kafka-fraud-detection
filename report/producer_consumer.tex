@@ -1,0 +1,101 @@
+% ---------------------------------------------------------------------------
+% Section 3.x: Producer and Consumer APIs, keys and partitioning, consumer groups
+% Author: Matia Lee. Drop into the report with \input{producer_consumer}.
+% Needs \usepackage{booktabs} (tables). Citation keys are in producer_consumer.bib.
+% Numbers marked "measured" come from runs on our 3-broker Kafka 4.1.0 cluster.
+% ---------------------------------------------------------------------------
+
+\subsection{Producer and Consumer APIs}
+\label{sec:clients}
+
+Applications reach Kafka through client libraries. The \emph{Producer API} appends records to topics and the \emph{Consumer API} reads them back. Kafka Streams, covered in the Streams section, is built on top of both. A record has a key, a value, a timestamp and optional headers; Kafka treats the key and value as opaque bytes, so the format is agreed between the applications. Our components exchange UTF-8 JSON with snake\_case fields and epoch-millisecond times. Our Python simulator and dashboard use \texttt{confluent-kafka}, a wrapper around the C library librdkafka, and the detector uses the Java client through Kafka Streams.
+
+\subsubsection{Producer API}
+
+\paragraph{Asynchronous, batched writes.}
+\texttt{produce()} does not wait for the broker. The record is placed in a local buffer for its target partition, and a background thread sends batches to that partition's leader broker. \texttt{linger.ms} (5\,ms by default in librdkafka~\cite{librdkafka-config}) is how long the client waits to fill a batch, which trades a few milliseconds of latency for fewer, larger requests. The result of each send arrives later through a \emph{delivery callback}, served when the application calls \texttt{poll()} or \texttt{flush()}. The simulator counts delivered and failed records in this callback and calls \texttt{flush()} on shutdown so that no buffered payment is lost. It also sets each record's Kafka timestamp to the payment's \texttt{timestamp\_ms}, so the log timestamp and the event time that the detector windows on are the same.
+
+\paragraph{Durability: \texttt{acks} and \texttt{min.insync.replicas}.}
+The \texttt{acks} setting decides when a write counts as successful~\cite{kafka-producer-configs}. With \texttt{acks=0} the producer does not wait for any response. With \texttt{acks=1} the leader acknowledges once the record is in its own log, so the record is lost if the leader fails before followers copy it. With \texttt{acks=all} the leader waits for the full set of in-sync replicas (ISR). All our topics have replication factor~3 and \texttt{min.insync.replicas=2}, and every producer uses \texttt{acks=all}. An acknowledged payment is therefore on at least two brokers, so one broker can fail without losing acknowledged data or blocking writes. If the ISR falls below two, the broker rejects the write instead of accepting it under-replicated~\cite{librdkafka-config}. Our benchmarks in the case study results measure the cost of this guarantee against \texttt{acks=0} and \texttt{acks=1}.
+
+\paragraph{Idempotence.}
+When a broker fails, a producer may retry a batch that was actually written, which creates a duplicate. With \texttt{enable.idempotence=true} the producer ``will ensure that exactly one copy of each message is written in the stream''~\cite{kafka-producer-configs}. At startup the producer gets a producer ID from the cluster and numbers every batch per partition. The broker discards any batch whose sequence number it has already stored, and order is preserved as long as at most five requests are in flight~\cite{shapira2021, kafka-producer-configs}. We saw this handshake on a fresh cluster: the simulator first logged \emph{``Failed to acquire idempotence PID from broker \dots\ Coordinator load in progress: retrying''} and then continued normally. Idempotence is on by default in the Java client~\cite{kafka-producer-configs} but \emph{off} by default in librdkafka~\cite{librdkafka-config}, so the simulator sets it explicitly. It removes duplicates caused by retries within one producer session. Atomic writes across topics, which the detector needs, come from transactions, described in the exactly-once section.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Setting & Value & Reason \\
+\midrule
+\texttt{acks} & \texttt{all} & acknowledged writes survive one broker failure \\
+\texttt{enable.idempotence} & \texttt{true} & no duplicates from retries; must be set in librdkafka \\
+\texttt{partitioner} & \texttt{murmur2\_random} & same key$\rightarrow$partition mapping as the Java client \\
+\texttt{linger.ms} & 5 & small batches, low latency at 20 payments/s \\
+record key & \texttt{card\_id} & per-card ordering, local state, co-partitioning \\
+record timestamp & \texttt{timestamp\_ms} & log time equals event time \\
+\bottomrule
+\end{tabular}
+\caption{Producer configuration used by the payment simulator.}
+\label{tab:producer-config}
+\end{table}
+
+\subsubsection{Consumer API}
+
+Consumers \emph{pull} data. The application calls \texttt{poll()} in a loop and gets the next records from each partition it reads. The consumer's position in each partition is an \emph{offset}, and nothing is removed from the log when it is read. This is the main difference from a traditional queue: the same records can be read by many applications, or read again later~\cite{shapira2021}. Three settings shape how our consumers behave:
+
+\begin{itemize}
+  \item \textbf{Offset commits.} A consumer in a group saves its position in Kafka so that it can resume after a restart. By default librdkafka commits automatically every 5\,s~\cite{librdkafka-config}, so after a crash up to about 5\,s of records may be read a second time. This is \emph{at-least-once} reading. That is fine for the dashboard, which only displays data. The detector does not depend on it, because Kafka Streams commits offsets inside its transactions.
+  \item \textbf{\texttt{auto.offset.reset}.} Decides where a group with no saved offset starts: \texttt{earliest} or \texttt{latest}~\cite{kafka-consumer-configs}. The dashboard uses \texttt{earliest}, so it shows alerts raised before it was opened.
+  \item \textbf{\texttt{isolation.level}.} Transactional records only become visible to a \texttt{read\_committed} consumer once their transaction commits. Such a consumer reads up to the \emph{last stable offset}, so aborted writes are never returned~\cite{kafka-consumer-configs}. The default is \texttt{read\_uncommitted} in Java but \texttt{read\_committed} in librdkafka~\cite{kafka-consumer-configs, librdkafka-config}. Because the default depends on the client library, the dashboard and the exactly-once check set \texttt{read\_committed} explicitly when reading \texttt{fraud-alerts}.
+\end{itemize}
+
+Our code reads Kafka in three different ways. (1)~The dashboard \emph{subscribes} to \texttt{payments} and \texttt{fraud-alerts} as part of a consumer group. Kafka decides which partitions it reads. (2)~The simulator, when it restarts, \emph{assigns} itself every partition of \texttt{payments} from the beginning, without joining a group, and replays the log to rebuild each card's history (count, running average, last country). The detector built its state from the same records, so the restarted simulator stays consistent with it and does not produce false alerts. In one restart it replayed 3{,}024 earlier payments before resuming (measured). The log is the source of truth, and any application can rebuild state from it. (3)~The smoke test assigns itself the exact partitions and offsets returned by its delivery callbacks. It reads back only its own 10 records, however large the topic is.
+
+\subsection{Keys and Partitioning}
+\label{sec:keys}
+
+A topic is split into partitions, and the producer chooses a partition for each record. If the record has a key, the Java client's default logic chooses ``a partition based on a hash of the key''. If there is no key, records go to a ``sticky'' partition that changes once a batch fills~\cite{kafka-producer-configs}. The same key always maps to the same partition while the partition count stays the same. Kafka only guarantees order \emph{within} a partition, so the key defines the unit of ordering.
+
+\paragraph{Why every record is keyed by \texttt{card\_id}.}
+\begin{enumerate}
+  \item \textbf{Per-card ordering.} All payments of a card are in one partition, in the order they were sent. The \texttt{GEO\_MISMATCH} and \texttt{AMOUNT\_SPIKE} rules compare each payment with the card's previous ones, so they depend on this order.
+  \item \textbf{Local state.} Kafka Streams creates one task per partition. All of a card's payments go to the same task, so each rule keeps per-card state in a local store and never has to repartition (reshuffle) the stream.
+  \item \textbf{Co-partitioning for the join.} \texttt{OVER\_LIMIT} joins each payment with the card's profile from \texttt{card-profiles}. This join is local only if the two topics have the same partition count and the same key mapping, so that partition~$i$ of \texttt{payments} and partition~$i$ of \texttt{card-profiles} hold the same cards. \texttt{create-topics.sh} creates both topics with 6 partitions, and the simulator checks that the counts match at startup.
+  \item \textbf{Compaction.} \texttt{card-profiles} is log-compacted, so Kafka keeps the latest record \emph{per key}. With \texttt{card\_id} as the key, the topic acts as a table of the current profile of each card (see the storage section).
+\end{enumerate}
+
+\paragraph{A cross-language pitfall.}
+The default hash function depends on the client library. librdkafka's default partitioner is \texttt{consistent\_random}, a CRC32 hash. Its \texttt{murmur2\_random} option is described as ``functionally equivalent to the default partitioner in the Java Producer''~\cite{librdkafka-config}. To check whether this matters, we produced the keys \texttt{card\_0000}--\texttt{card\_0049} to a 6-partition topic from the Java console producer and from Python. With librdkafka's default, only 13 of the 50 keys landed in the same partition as with Java, about what chance gives with six partitions. With \texttt{murmur2\_random}, all 50 matched (measured). Co-partitioning only works if every producer of a topic uses the same mapping. A Java producer writing profiles and a default-configured Python producer writing payments would therefore break the join without any error message. The simulator and smoke test both set \texttt{partitioner=murmur2\_random}.
+
+\paragraph{Limits of key-based partitioning.}
+The partition is chosen from the hash and the partition count. Adding partitions later therefore moves keys to different partitions. That breaks per-key ordering across the change and the co-partitioning above~\cite{shapira2021}, so we fixed the count at 6 before producing any data. Hashing also does not balance load: one very active key always goes to the same partition. With 500 cards of similar activity, our traffic is spread evenly.
+
+\subsection{Consumer Groups}
+\label{sec:groups}
+
+A consumer group is a set of consumers that share a \texttt{group.id}~\cite{kafka-consumer-configs} and divide a topic's partitions between them. Each partition is read by exactly one member of the group. Different groups are independent, and each one receives the full stream~\cite{shapira2021}. The same mechanism therefore supports both load balancing (more members in one group) and publish-subscribe (more groups). Table~\ref{tab:groups} lists the groups and other readers in our system.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Reader & Reads & How \\
+\midrule
+\texttt{fraud-detector} & \texttt{payments}, \texttt{card-profiles} & Kafka Streams; \texttt{application.id} is the group id~\cite{kafka-streams-configs} \\
+\texttt{fraud-dashboard} & \texttt{payments}, \texttt{fraud-alerts} & subscribe; \texttt{read\_committed}; starts at \texttt{earliest} \\
+simulator (on restart) & \texttt{payments} & assign from offset 0, no group membership \\
+smoke test, checks & \texttt{payments}, \texttt{fraud-alerts} & new group id each run, or assigned offsets \\
+\bottomrule
+\end{tabular}
+\caption{Readers of our topics. Each group gets its own copy of every record.}
+\label{tab:groups}
+\end{table}
+
+Because the dashboard has its own group, it receives every payment and alert, and the detector still receives every payment. Neither one slows down or takes records from the other. Kafka UI shows each group's lag (how far its committed offsets are behind the end of the log) separately.
+
+\paragraph{Rebalancing.}
+When a member joins, leaves or stops polling for longer than \texttt{max.poll.interval.ms}, the group \emph{rebalances} and partitions are reassigned~\cite{librdkafka-config}. We observed this directly. As the only member of \texttt{fraud-dashboard}, the dashboard was assigned all 12 partitions (6 of each topic). When we started a second consumer with the same \texttt{group.id}, it was assigned partitions 3--5 of both topics after a 2.8\,s rebalance, and the dashboard kept the other six (measured). The same applies to the detector: a second instance with the same \texttt{application.id} would take over half of its tasks and their state stores. Since each topic has 6 partitions, at most 6 members of a group can do useful work, and any extra members stay idle. The partition count is therefore the upper limit on parallelism.
+
+Kafka 4.0 made a new rebalance protocol (KIP-848) generally available. The broker computes assignments and changes them incrementally, so consumers no longer all stop during a rebalance. The server enables it by default, but clients must opt in with \texttt{group.protocol=consumer}~\cite{kafka-40-release}. Both the Java client and librdkafka still default to the original \texttt{classic} protocol~\cite{kafka-consumer-configs, librdkafka-config}. Our groups are small and change rarely, so we kept the default.
