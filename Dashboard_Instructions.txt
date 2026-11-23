@@ -2,6 +2,7 @@ Notes:
 - Needs Python 3.10 or later (needed for pandas)
 - Needs Maven
 - Use conda to activate Kafka
+- Streamlit in conda env
 
 1. Start the cluster (Terminal 1, Docker Desktop open)
 	$ cd ~/kafka-fraud-detection
