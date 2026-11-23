@@ -62,11 +62,17 @@ def main():
         path = files[-1]
 
     t, acked, consumed, no_leader, min_isr, events = load(path)
+    # The run ends with a drain period after the producer stops; cut it off so
+    # the final drop to zero isn't mistaken for an outage.
+    last = max((i for i, a in enumerate(acked) if a), default=len(t) - 1)
+    end_t = t[last]
     fig, (top, bottom) = plt.subplots(2, 1, figsize=(10, 6), sharex=True,
                                       gridspec_kw={"height_ratios": [2, 1]})
 
     top.plot(t, rolling_per_sec(acked), color=BLUE, linewidth=2, label="Acknowledged by Kafka")
-    top.plot(t, rolling_per_sec(consumed), color=ORANGE, linewidth=2, label="Received by consumer")
+    # Dashed so the acked line stays visible where the two overlap.
+    top.plot(t, rolling_per_sec(consumed), color=ORANGE, linewidth=2, linestyle=(0, (4, 3)),
+             label="Received by consumer")
     top.set_ylabel("Messages / s", color=MUTED)
     top.set_title(f"Broker failure and recovery (run {path.stem.split('_', 1)[1]})",
                   loc="left", color=INK, fontsize=12)
@@ -85,6 +91,7 @@ def main():
 
     for ax in (top, bottom):
         style(ax)
+        ax.set_xlim(t[0], end_t)
         for x, label in events:
             ax.axvline(x, color=MUTED, linewidth=1, linestyle="--")
     for x, label in events:
