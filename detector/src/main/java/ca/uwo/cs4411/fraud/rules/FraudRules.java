@@ -19,8 +19,11 @@ public final class FraudRules {
     public static List<FraudRule> all() {
         return List.of(
                 new VelocityRule(),
-                new OverLimitRule()
-                // more rules get added here as they are implemented
+                new OverLimitRule(),
+                
+                // new rules
+                new GeoMismatchRule(),
+                new AmountSpikeRule()
         );
     }
 }
