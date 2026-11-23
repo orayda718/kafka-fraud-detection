@@ -1,0 +1,22 @@
+1. Start the cluster (Terminal 1, Docker Desktop open)
+	$ cd ~/kafka-fraud-detection
+	$ docker compose up -d 
+	$ ./scripts/create-topics.sh
+
+2. Start the dashboard (Terminal 2)
+	$ conda activate kafka
+	$ cd ~/kafka-fraud-detection
+	$ python -m streamlit run dashboard/app.py
+
+3. Start the detector (Terminal 3)
+	$ conda activate kafka
+	$ cd ~/kafka-fraud-detection/detector 
+	$ mvn -q package && java -jar target/fraud-detector-0.1.0-jar-with-dependencies.jar
+
+4. Start the simulator and inject fraud (Terminal 4)
+	$ conda activate kafka
+	$ cd ~/kafka-fraud-detection
+	Either type the fraud yourself:
+	$ python simulator/simulator.py          (then type burst / travel / spike / limit)
+	Or run all four automatically:
+	$ python simulator/simulator.py --inject burst,travel,spike,limit --inject-start 20 --inject-every 15
