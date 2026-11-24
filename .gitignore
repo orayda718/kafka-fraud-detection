@@ -16,3 +16,6 @@ __pycache__/
 experiments/results/*.log
 # Demo script logs
 demo-logs/
+
+# Simulator run output (regenerated each run)
+simulator/injected.log
