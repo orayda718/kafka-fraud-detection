@@ -83,6 +83,51 @@ java -jar target/fraud-detector-0.1.0-jar-with-dependencies.jar
 
 Example: `GUARANTEE=at_least_once java -jar target/fraud-detector-0.1.0-jar-with-dependencies.jar`
 
+## Payment simulator
+
+Run with the venv active, from the repo root:
+
+```bash
+python simulator/simulator.py
+```
+
+On startup the simulator publishes 500 card profiles to `card-profiles`, then streams about 20 normal payments/sec to `payments`. Type a command and press Enter to inject fraud:
+
+| Command | What it sends | Expected alert |
+|---|---|---|
+| `burst` | 8 payments on one card, 1.5 s apart | `VELOCITY` |
+| `travel` | a payment in CA, then one in BR 30 s later | `GEO_MISMATCH` |
+| `spike` | one payment of 10x the card's running average | `AMOUNT_SPIKE` |
+| `limit` | one payment of about 1.3x the card's spending limit | `OVER_LIMIT` |
+
+Add a card ID to target a specific card (`burst card_0042`). Other commands: `status`, `help`, `quit`.
+
+Every injection is appended to `simulator/injected.log` (one JSON object per line) after its last payment is sent: type, expected rule, card, all payment IDs, the payment that should trigger the alert, and timestamps. Injections still in progress when you quit are listed on screen but not logged.
+
+Normal traffic never triggers a rule by itself. The simulator mirrors the detector's thresholds (`guards` in `simulator/config.yaml`): at most 4 payments per card per minute, amounts capped at 4x the card's running average and 80% of its limit, and a card only changes country after a gap longer than the `GEO_MISMATCH` window. If you change `rules.properties`, update `guards` to match.
+
+Useful options (all settings are in `simulator/config.yaml`; flags override them):
+
+```bash
+python simulator/simulator.py --seed 7 --rate 10                  # different seed / rate
+python simulator/simulator.py --inject burst,travel,spike,limit \
+    --inject-start 30 --inject-every 15 --duration 120 --no-keyboard   # scripted run
+python simulator/simulator.py --bench --rate 2000 --duration 60 --no-keyboard   # benchmarks
+python simulator/simulator.py --help
+```
+
+- **Reproducible:** the same seed gives the same cards, profiles, amounts and payment IDs. Event times follow the schedule, so on a fresh cluster two scripted runs (`--inject`) produce the same payments apart from the start time. Keyboard injections depend on when you type them.
+- **Restarts are safe:** at startup the simulator replays `payments` to rebuild each card's history (the detector has seen the same history), so it never sends a payment that the detector would wrongly flag. Use `--no-rebuild` to skip this.
+- **`--bench`:** fixed high rate for throughput and latency tests. It turns off the false-alert guards and uses wall-clock timestamps so pipeline latency includes any producer backlog. `--acks 0|1|all` and `--payments-topic` are available for benchmark runs only.
+
+## Dashboard
+
+```bash
+streamlit run dashboard/app.py      # opens http://localhost:8501
+```
+
+It shows live payments, the most active cards (count, total, average), fraud alerts in red with rule and reason, payments/sec, alert counts by rule and detection latency. It uses its own consumer group (`fraud-dashboard`), so it receives every event without affecting the detector, and reads alerts with `isolation.level=read_committed`. A new group starts from the beginning of the topics; set `DASHBOARD_OFFSET_RESET=latest` or a new `DASHBOARD_GROUP` to change that.
+
 ## Live demo
 
 ```bash

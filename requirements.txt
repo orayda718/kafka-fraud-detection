@@ -1,5 +1,6 @@
 # Python dependencies for the simulator, dashboard and experiment scripts
 confluent-kafka>=2.6
-streamlit>=1.40
+pyyaml>=6.0
+streamlit>=1.50
 pandas>=2.2
 matplotlib>=3.9
