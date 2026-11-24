@@ -507,20 +507,32 @@ class Simulator:
             return mult * avg < 0.9 * c.spending_limit
         quiet_ms = 2 * self.velocity_window_ms + 60_000
 
-        def calm(c: Card) -> bool:  # no recent burst and room for one more payment
-            return not self.would_velocity(c, ts) and (
+        def room_for(c: Card, n: int) -> bool:
+            # The injection sends n payments 13 s apart (warm-ups, then the spike). Check
+            # every one of them, together with the card's recent payments, stays within
+            # the VELOCITY limit, so the spike never also raises a VELOCITY alert.
+            plan = [ts + i * 13_000 for i in range(n)]
+            for t in plan:
+                lo = t - self.velocity_window_ms
+                in_window = sum(lo <= h <= t for h in c.recent) + sum(lo <= p <= t for p in plan)
+                if in_window > 5:
+                    return False
+            return True
+
+        def calm(c: Card, warmups: int = 0) -> bool:  # no recent burst, room for every payment
+            return room_for(c, warmups + 1) and (
                 c.last_burst_ts is None or ts - c.last_burst_ts > quiet_ms)
         card = forced or self.pick(self.normal_cards, lambda c: c.count >= need and fits(c) and calm(c))
         warmups = 0
         if card is None:
             # Fresh cluster: no card has enough history yet. Give one card a few spaced-out
             # normal payments first (13 s apart so VELOCITY can't fire), then the spike.
-            card = self.pick(self.normal_cards, lambda c: fits(c) and calm(c) and not self.would_geo(
-                c, c.last_country or c.home_country, ts))
+            card = self.pick(self.normal_cards, lambda c: fits(c) and calm(c, max(0, need - c.count))
+                             and not self.would_geo(c, c.last_country or c.home_country, ts))
             if card is None:
                 print("[sim] no card available for spike")
                 return None
-            warmups = need - card.count
+            warmups = max(0, need - card.count)
         inj = self.new_injection("spike", card)
 
         def warm(step_ts):
