@@ -18,4 +18,6 @@ $KT --create --if-not-exists --topic fraud-alerts \
     --partitions "$PARTITIONS" --replication-factor 3 \
     --config min.insync.replicas=2
 
-$KT --describe --topic payments --topic card-profiles --topic fraud-alerts 2>/dev/null || $KT --list
+for t in payments card-profiles fraud-alerts; do
+  $KT --describe --topic "$t"
+done
